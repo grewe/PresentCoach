@@ -17,4 +17,4 @@ The goal is to give users **actionable, automated coaching** so they can refine 
 
 
 
-###Important: you must copy the .env.example file to .env and update the credentials.  Read the [.env info](https://github.com/grewe/PresentCoach/blob/main/docs/EnvironmentalVariables) for details.
+###Important: you must copy the .env.example file to .env and update the credentials.  Read the [.env info](https://github.com/grewe/PresentCoach/blob/main/docs/environment.md) for details.
