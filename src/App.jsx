@@ -3,14 +3,20 @@ import { segmentCountFromDuration } from "./segmentMath.js";
 import "./App.css";
 
 export default function App() {
+  // Refs for file input, video object URL, and file data
   const fileInputRef = useRef(null);
   const objectUrlRef = useRef(null);
   const fileRef = useRef(null);
+  
+  // Track upload sessions and abort split operations
   const uploadIdRef = useRef(0);
   const splitAbortRef = useRef(null);
+  
+  // Cache segment URLs and track metadata upload
   const segmentUrlsRef = useRef([]);
   const lastMetadataUploadIdRef = useRef(-1);
 
+  // UI state
   const [videoSrc, setVideoSrc] = useState(null);
   const [segments, setSegments] = useState([]);
   const [splitStatus, setSplitStatus] = useState("idle");
@@ -21,6 +27,7 @@ export default function App() {
   const missingCredMessage = (seq) =>
     `Sequence ${seq} can not be analyzed as the .env specifying Google Credentials was not set properly.`;
 
+  // Check if Gemini API is configured on mount
   useEffect(() => {
     let cancelled = false;
     fetch("/api/health")
@@ -36,11 +43,13 @@ export default function App() {
     };
   }, []);
 
+  // Revoke all segment blob URLs
   const revokeSegmentUrls = useCallback(() => {
     segmentUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
     segmentUrlsRef.current = [];
   }, []);
 
+  // Revoke main video blob URL
   const revokeCurrentUrl = useCallback(() => {
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current);
@@ -48,6 +57,7 @@ export default function App() {
     }
   }, []);
 
+  // Cleanup blob URLs on unmount
   useEffect(
     () => () => {
       revokeSegmentUrls();
@@ -56,10 +66,12 @@ export default function App() {
     [revokeCurrentUrl, revokeSegmentUrls]
   );
 
+  // Trigger file input dialog
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
 
+  // Handle video file selection and validation
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -71,6 +83,7 @@ export default function App() {
       return;
     }
 
+    // Cancel previous split operation and reset state
     splitAbortRef.current?.abort();
     splitAbortRef.current = new AbortController();
 
@@ -90,30 +103,39 @@ export default function App() {
     e.target.value = "";
   };
 
+  //************************************************************* */
+  // Process video metadata and split into segments
   const handleMainVideoLoadedMetadata = async (e) => {
+    // Capture current upload session ID to detect cancellations
     const uploadId = uploadIdRef.current;
     const file = fileRef.current;
     const duration = e.target.duration;
 
+    // Abort if file is missing or upload session has changed
     if (!file || uploadIdRef.current !== uploadId) return;
 
+    // Prevent duplicate processing of the same metadata event
     if (lastMetadataUploadIdRef.current === uploadId) return;
     lastMetadataUploadIdRef.current = uploadId;
 
+    // Validate video duration is available and positive
     if (!Number.isFinite(duration) || duration <= 0) {
       setSplitError("Could not read video duration.");
       setSplitStatus("error");
       return;
     }
 
+    // Calculate how many segments the video should be split into
     const count = segmentCountFromDuration(duration);
 
+    // Handle invalid video length
     if (count === 0) {
       setSplitError("Invalid video length.");
       setSplitStatus("error");
       return;
     }
 
+    // Single segment: no need to split, use original video
     if (count === 1) {
       if (uploadIdRef.current !== uploadId) return;
       setSegments([{ seq: 1, url: objectUrlRef.current }]);
@@ -121,6 +143,7 @@ export default function App() {
       return;
     }
 
+    // Get abort signal for cancelling split operation
     const signal = splitAbortRef.current?.signal;
     if (!signal) {
       setSplitStatus("error");
@@ -130,26 +153,34 @@ export default function App() {
     setSplitStatus("loading");
 
     try {
+      // Dynamically import split function and process video
       const { splitVideoSegments } = await import("./splitVideoSegments.js");
       const list = await splitVideoSegments(file, duration, signal);
 
+      // Clean up if upload was cancelled while processing
       if (uploadIdRef.current !== uploadId) {
         list.forEach((s) => URL.revokeObjectURL(s.url));
         return;
       }
 
+      // Cache segment URLs and update state with segments
       segmentUrlsRef.current = list.map((s) => s.url);
       setSegments(list);
       setSplitStatus("ready");
     } catch (err) {
+      // Ignore errors from cancelled uploads or aborted operations
       if (uploadIdRef.current !== uploadId) return;
       if (err?.name === "AbortError") return;
+      
+      // Display error message to user
       setSplitError(err instanceof Error ? err.message : "Split failed.");
       setSplitStatus("error");
     }
   };
 
+  // Send segment to Gemini API for analysis
   const handleAnalyze = async (seq, url) => {
+    // Check if Gemini API is configured; if not, show error
     if (geminiConfigured === false) {
       setAnalysisBySeq((prev) => ({
         ...prev,
@@ -162,19 +193,30 @@ export default function App() {
       return;
     }
 
+    // Set loading state while waiting for API response
     setAnalysisBySeq((prev) => ({
       ...prev,
       [seq]: { status: "loading" },
     }));
+    
     try {
+      // Fetch video blob from the segment URL
       const blob = await fetch(url).then((r) => r.blob());
+      
+      // Prepare FormData with video file
       const fd = new FormData();
       fd.append("video", blob, `sequence-${seq}.mp4`);
+      
+      // Send video to analysis API endpoint
       const res = await fetch("/api/analyze", {
         method: "POST",
         body: fd,
       });
+      
+      // Parse response JSON, default to empty object if parsing fails
       const data = await res.json().catch(() => ({}));
+      
+      // Handle missing Google credentials error
       if (res.status === 503 && data?.code === "MISSING_GOOGLE_CREDENTIALS") {
         setAnalysisBySeq((prev) => ({
           ...prev,
@@ -186,17 +228,24 @@ export default function App() {
         }));
         return;
       }
+      
+      // Check for general request errors
       if (!res.ok) {
         throw new Error(data.error || `Request failed (${res.status})`);
       }
+      
+      // Validate response contains analysis text
       if (typeof data.text !== "string") {
         throw new Error("Invalid response from server.");
       }
+      
+      // Store successful analysis result
       setAnalysisBySeq((prev) => ({
         ...prev,
         [seq]: { status: "done", text: data.text },
       }));
     } catch (e) {
+      // Handle and display any errors that occurred during analysis
       setAnalysisBySeq((prev) => ({
         ...prev,
         [seq]: {
@@ -214,6 +263,7 @@ export default function App() {
       </header>
 
       <main className="app__main">
+        {/* Upload and video playback section */}
         <section className="app__panel app__panel--actions" aria-label="Actions">
           <input
             ref={fileInputRef}
@@ -249,6 +299,7 @@ export default function App() {
           ) : null}
         </section>
 
+        {/* Analysis results section */}
         <section className="app__panel app__panel--analysis" aria-label="Analysis">
           <h2 className="app__analysis-title">Analysis</h2>
           <div className="app__table-wrap">
