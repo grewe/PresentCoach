@@ -14,3 +14,7 @@ The goal is to give users **actionable, automated coaching** so they can refine 
 
 
 <img width="1678" height="1349" alt="image" src="https://github.com/user-attachments/assets/c5228770-a8e1-41e7-b821-1a3917d4a41d" />
+
+
+
+###Important: you must copy the .env.example file to .env and update the credentials.  Read the [.env info]() for details.
